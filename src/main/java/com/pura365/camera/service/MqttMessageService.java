@@ -1,0 +1,548 @@
+package com.pura365.camera.service;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pura365.camera.domain.Device;
+import com.pura365.camera.model.mqtt.*;
+import com.pura365.camera.repository.DeviceRepository;
+import com.pura365.camera.util.TimeValidator;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+/**
+ * MQTT 消息服务
+ * 负责发送消息到摄像头，以及处理摄像头上报的消息
+ */
+@Service
+public class MqttMessageService {
+    
+    private static final Logger log = LoggerFactory.getLogger(MqttMessageService.class);
+    
+    @Value("${mqtt.broker.url:tcp://cam.pura365.cn:1883}")
+    private String brokerUrl;
+    
+    @Value("${mqtt.client.id:local-camera-server}")
+    private String clientId;
+    
+    @Value("${mqtt.username:camera_test}")
+    private String username;
+    
+    @Value("${mqtt.password:123456}")
+    private String password;
+    
+    @Autowired
+    private MqttEncryptService encryptService;
+    
+    @Autowired
+    private DeviceSsidService deviceSsidService;
+    
+    @Autowired
+    private DeviceRepository deviceRepository;
+    
+    // 缓存 WebRTC Offer：sid -> WebRtcMessage（最近一次）
+    private final Map<String, WebRtcMessage> webrtcOfferCache = new ConcurrentHashMap<>();
+    // 缓存 WebRTC Candidate：sid -> List<WebRtcMessage>（待拉取的远端 Candidate）
+    private final Map<String, List<WebRtcMessage>> webrtcCandidateCache = new ConcurrentHashMap<>();
+    
+    private MqttClient mqttClient;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private final String SSID = "SGhome";
+    
+    @PostConstruct
+    public void init() {
+        try {
+            connectToMqtt();
+            log.info("MQTT服务初始化成功");
+        } catch (Exception e) {
+            log.error("MQTT服务初始化失败", e);
+        }
+    }
+    
+    @PreDestroy
+    public void destroy() {
+        if (mqttClient != null && mqttClient.isConnected()) {
+            try {
+                mqttClient.disconnect();
+                mqttClient.close();
+                log.info("MQTT连接已关闭");
+            } catch (Exception e) {
+                log.error("关闭MQTT连接失败", e);
+            }
+        }
+    }
+    
+    /**
+     * 连接到MQTT Broker
+     */
+    private void connectToMqtt() throws Exception {
+        mqttClient = new MqttClient(brokerUrl, clientId);
+        
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setCleanSession(true);
+        options.setAutomaticReconnect(true);
+        options.setConnectionTimeout(10);
+        options.setKeepAliveInterval(60);
+        
+        if (username != null && !username.isEmpty()) {
+            options.setUserName(username);
+        }
+        if (password != null && !password.isEmpty()) {
+            options.setPassword(password.toCharArray());
+        }
+        
+        mqttClient.connect(options);
+        log.info("已连接到MQTT Broker: {}", brokerUrl);
+        
+        // 设置消息回调
+        mqttClient.setCallback(new org.eclipse.paho.client.mqttv3.MqttCallback() {
+            @Override
+            public void connectionLost(Throwable cause) {
+                log.warn("MQTT连接丢失", cause);
+            }
+            
+            @Override
+            public void messageArrived(String topic, MqttMessage message) throws Exception {
+                handleIncomingMessage(topic, message.getPayload());
+            }
+            
+            @Override
+            public void deliveryComplete(org.eclipse.paho.client.mqttv3.IMqttDeliveryToken token) {
+                // 消息发送完成
+            }
+        });
+        
+        // 订阅所有设备主题（使用通配符）
+        mqttClient.subscribe("camera/pura365/+/device", 0);
+        log.info("已订阅主题: camera/pura365/+/device");
+    }
+    
+    /**
+     * 处理收到的MQTT消息
+     */
+    private void handleIncomingMessage(String topic, byte[] payload) {
+        try {
+            log.info("收到MQTT消息 - Topic: {}, 长度: {} bytes", topic, payload.length);
+            log.debug("消息十六进制(连续): {}", MqttEncryptService.bytesToHex(payload));
+            log.info("消息十六进制(分组): {}", MqttEncryptService.bytesToGroupedHex(payload));
+            
+            // 从topic提取设备序列号: camera/pura365/{deviceId}/device
+            String deviceId = extractDeviceIdFromTopic(topic);
+            if (deviceId == null) {
+                log.warn("无法从topic提取设备ID: {}", topic);
+                return;
+            }
+            
+            // 获取设备的SSID
+            String ssid = deviceSsidService.getSsid(deviceId);
+            
+            // 解密消息
+            String json = encryptService.decrypt(payload, ssid);
+            log.info("解密后的消息: {}", json);
+            
+            // 解析基础消息获取code
+            MqttBaseMessage baseMsg = objectMapper.readValue(json, MqttBaseMessage.class);
+            Integer code = baseMsg.getCode();
+            
+            if (code == null) {
+                log.warn("消息中没有code字段");
+                return;
+            }
+            
+            // 根据code分发处理
+            handleMessageByCode(code, json, deviceId);
+            
+        } catch (Exception e) {
+            log.error("处理MQTT消息失败", e);
+        }
+    }
+    
+    /**
+     * 根据code分发消息处理
+     */
+    private void handleMessageByCode(Integer code, String json, String deviceId) throws Exception {
+        log.info("处理设备 {} 的消息，CODE: {}", deviceId, code);
+        
+        switch (code) {
+            case 138: // CODE 10 + 128: MQTT已连接
+                MqttCode10Message code10 = objectMapper.readValue(json, MqttCode10Message.class);
+                handleMqttConnected(code10, deviceId);
+                break;
+            case 139: // CODE 11 + 128: 设备信息响应
+                MqttDeviceInfoMessage code11 = objectMapper.readValue(json, MqttDeviceInfoMessage.class);
+                handleDeviceInfo(code11, deviceId);
+                break;
+            case 151: // CODE 23 + 128: WebRTC Offer响应
+                WebRtcMessage offerMsg = objectMapper.readValue(json, WebRtcMessage.class);
+                handleWebRtcOffer(offerMsg, deviceId);
+                break;
+            case 152: // CODE 24 + 128: WebRTC Answer响应
+                WebRtcMessage answerMsg = objectMapper.readValue(json, WebRtcMessage.class);
+                handleWebRtcAnswer(answerMsg, deviceId);
+                break;
+            case 153: // CODE 25 + 128: WebRTC Candidate响应
+                WebRtcMessage candidateMsg = objectMapper.readValue(json, WebRtcMessage.class);
+                handleWebRtcCandidate(candidateMsg, deviceId);
+                break;
+            // TODO: 添加其他CODE的处理
+            default:
+                log.warn("未处理的消息CODE: {}", code);
+        }
+    }
+    
+    /**
+     * 处理设备MQTT连接消息
+     */
+    private void handleMqttConnected(MqttCode10Message msg, String deviceId) {
+        log.info("设备 {} MQTT已连接 - Status: {}", deviceId, msg.getStatus());
+        
+        // 更新设备在线状态到数据库
+        try {
+            Device device = deviceRepository.selectById(deviceId);
+            if (device != null) {
+                device.setStatus(1); // 1-在线
+                device.setLastOnlineTime(LocalDateTime.now());
+                deviceRepository.updateById(device);
+                log.info("已更新设备 {} 状态为在线", deviceId);
+            } else {
+                // 设备不存在，创建新设备记录
+                device = new Device();
+                device.setId(msg.getUid());
+                device.setMac("UNKNOWN"); // MAC地址后续通过设备信息更新
+                device.setStatus(1);
+                device.setEnabled(1);
+                device.setLastOnlineTime(LocalDateTime.now());
+                device.setCreatedAt(LocalDateTime.now());
+                deviceRepository.insert(device);
+                log.info("已创建新设备记录 {}", deviceId);
+            }
+        } catch (Exception e) {
+            log.error("更新设备 {} 在线状态失败", deviceId, e);
+        }
+        
+        // 如果status=1（配网后首次连接），可以触发额外逻辑
+        if (msg.getStatus() != null && msg.getStatus() == 1) {
+            log.info("设备 {} 配网后首次连接", deviceId);
+            // TODO: 后续可以通过 WebSocket 推送通知给 APP
+        }
+    }
+    
+    /**
+     * 处理设备信息响应
+     */
+    private void handleDeviceInfo(MqttDeviceInfoMessage msg, String deviceId) {
+        log.info("收到设备信息 - WiFi: {}, RSSI: {}, 版本: {}", 
+                msg.getWifiname(), msg.getWifirssi(), msg.getVer());
+        
+        // 更新设备信息到数据库
+        try {
+            Device device = deviceRepository.selectById(deviceId);
+            if (device == null) {
+                // 设备不存在，创建新记录
+                device = new Device();
+                device.setId(deviceId);
+                device.setMac("UNKNOWN");
+                device.setStatus(1);
+                device.setEnabled(1);
+                device.setCreatedAt(LocalDateTime.now());
+            }
+            
+            // 更新设备信息
+            if (msg.getWifiname() != null) {
+                device.setSsid(msg.getWifiname());
+                // 同步更新 SSID 到缓存，用于后续消息加解密
+                deviceSsidService.saveSsid(deviceId, msg.getWifiname());
+            }
+            if (msg.getVer() != null) {
+                device.setFirmwareVersion(msg.getVer());
+            }
+            device.setLastOnlineTime(LocalDateTime.now());
+            device.setUpdatedAt(LocalDateTime.now());
+            
+            if (device.getCreatedAt() == null) {
+                deviceRepository.insert(device);
+                log.info("已创建设备 {} 信息记录", deviceId);
+            } else {
+                deviceRepository.updateById(device);
+                log.info("已更新设备 {} 信息: SSID={}, 版本={}", deviceId, msg.getWifiname(), msg.getVer());
+            }
+        } catch (Exception e) {
+            log.error("更新设备 {} 信息失败", deviceId, e);
+        }
+    }
+    
+    /**
+     * 处理WebRTC Offer响应
+     */
+    private void handleWebRtcOffer(WebRtcMessage msg, String deviceId) {
+        log.info("收到WebRTC Offer - SID: {}, Status: {}", msg.getSid(), msg.getStatus());
+        // 缓存最新的 Offer，供调试/前端轮询使用
+        if (msg.getSid() != null) {
+            webrtcOfferCache.put(msg.getSid(), msg);
+            log.info("已缓存 WebRTC Offer, SID: {}", msg.getSid());
+        }
+        // 通过 WebSocket 转发 Offer 给对应的客户端
+        notifyWebRtcMessage(deviceId, "offer", msg);
+    }
+    
+    /**
+     * 处理WebRTC Answer响应
+     */
+    private void handleWebRtcAnswer(WebRtcMessage msg, String deviceId) {
+        log.info("收到WebRTC Answer - SID: {}, Status: {}", msg.getSid(), msg.getStatus());
+        // 通过 WebSocket 转发 Answer 给对应的客户端
+        notifyWebRtcMessage(deviceId, "answer", msg);
+    }
+    
+    /**
+     * 处理WebRTC Candidate响应
+     */
+    private void handleWebRtcCandidate(WebRtcMessage msg, String deviceId) {
+        log.info("收到WebRTC Candidate - SID: {}, Status: {}", msg.getSid(), msg.getStatus());
+        if (msg.getSid() != null) {
+            webrtcCandidateCache
+                    .computeIfAbsent(msg.getSid(), k -> new CopyOnWriteArrayList<>())
+                    .add(msg);
+            log.info("已缓存 WebRTC Candidate, SID: {}", msg.getSid());
+        }
+        // 通过 WebSocket 转发 Candidate 给对应的客户端
+        notifyWebRtcMessage(deviceId, "candidate", msg);
+    }
+    
+    // ==================== WebSocket 通知相关 ====================
+    
+    // WebSocket 会话管理：deviceId -> List<WebSocketSession>
+    // 实际项目中应使用 WebSocketHandler 管理，这里提供简化的回调接口
+    private final Map<String, List<WebRtcMessageListener>> webrtcListeners = new ConcurrentHashMap<>();
+    
+    /**
+     * WebRTC 消息监听器接口
+     */
+    public interface WebRtcMessageListener {
+        void onMessage(String deviceId, String type, WebRtcMessage message);
+    }
+    
+    /**
+     * 注册 WebRTC 消息监听器
+     */
+    public void addWebRtcListener(String deviceId, WebRtcMessageListener listener) {
+        webrtcListeners.computeIfAbsent(deviceId, k -> new CopyOnWriteArrayList<>()).add(listener);
+        log.info("已注册设备 {} 的 WebRTC 监听器", deviceId);
+    }
+    
+    /**
+     * 移除 WebRTC 消息监听器
+     */
+    public void removeWebRtcListener(String deviceId, WebRtcMessageListener listener) {
+        List<WebRtcMessageListener> listeners = webrtcListeners.get(deviceId);
+        if (listeners != null) {
+            listeners.remove(listener);
+            if (listeners.isEmpty()) {
+                webrtcListeners.remove(deviceId);
+            }
+        }
+    }
+    
+    /**
+     * 通知 WebRTC 消息给监听者
+     */
+    private void notifyWebRtcMessage(String deviceId, String type, WebRtcMessage msg) {
+        List<WebRtcMessageListener> listeners = webrtcListeners.get(deviceId);
+        if (listeners != null && !listeners.isEmpty()) {
+            for (WebRtcMessageListener listener : listeners) {
+                try {
+                    listener.onMessage(deviceId, type, msg);
+                } catch (Exception e) {
+                    log.error("通知 WebRTC 消息失败", e);
+                }
+            }
+            log.info("已通知 {} 个监听者，设备: {}, 类型: {}", listeners.size(), deviceId, type);
+        } else {
+            log.debug("设备 {} 没有注册监听器，消息类型: {}", deviceId, type);
+        }
+    }
+    
+    // ==================== 设备离线检测 ====================
+    
+    /**
+     * 标记设备离线（可由定时任务或 MQTT 断开回调调用）
+     */
+    public void markDeviceOffline(String deviceId) {
+        try {
+            Device device = deviceRepository.selectById(deviceId);
+            if (device != null && device.getStatus() != null && device.getStatus() == 1) {
+                device.setStatus(0); // 0-离线
+                device.setUpdatedAt(LocalDateTime.now());
+                deviceRepository.updateById(device);
+                log.info("已标记设备 {} 为离线", deviceId);
+            }
+        } catch (Exception e) {
+            log.error("标记设备 {} 离线失败", deviceId, e);
+        }
+    }
+    
+    /**
+     * 发送消息到指定设备（指定SSID，可为null）
+     */
+    public void sendToDevice(String deviceId, Object message, String ssid) throws Exception {
+        String topic = "camera/pura365/" + deviceId + "/master";
+
+        // 打印未加密前的 JSON（方便对照设备侧日志）
+        try {
+            String jsonPlain = objectMapper.writeValueAsString(message);
+            log.info("即将发送MQTT消息到设备 {} - Topic: {}, 明文JSON: {}", deviceId, topic, jsonPlain);
+        } catch (Exception e) {
+            log.warn("序列化MQTT消息为JSON失败，将继续发送加密消息", e);
+        }
+        
+        // 加密消息
+        byte[] encrypted = encryptService.encrypt(message, ssid);
+        
+        // 发送
+        MqttMessage mqttMessage = new MqttMessage(encrypted);
+        mqttMessage.setQos(1);
+        mqttMessage.setRetained(false);
+        
+        mqttClient.publish(topic, mqttMessage);
+        log.info("已发送消息到设备 {} - Topic: {}, 大小: {} bytes", deviceId, topic, encrypted.length);
+        log.info("发送消息十六进制(分组): {}", MqttEncryptService.bytesToGroupedHex(encrypted));
+    }
+    
+    /**
+     * 请求设备信息（CODE 11），ssid 现在走默认配置
+     */
+    public void requestDeviceInfo(String deviceId) throws Exception {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("code", 11);
+        msg.put("time", TimeValidator.getCurrentTimestamp());
+        log.info("当前时间 {}",System.currentTimeMillis());
+        sendToDevice(deviceId, msg, null);
+        log.info("已请求设备 {} 的信息", deviceId);
+    }
+    
+    /**
+     * 请求WebRTC Offer（CODE 23），ssid 走默认
+     */
+    public void requestWebRtcOffer(String deviceId, String sid, String rtcServer) throws Exception {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("code", 23);
+        msg.put("time", TimeValidator.getCurrentTimestamp());
+        msg.put("sid", sid);
+        msg.put("rtc", rtcServer); // 格式: server,user,pass
+        
+        sendToDevice(deviceId, msg, null);
+        log.info("已请求设备 {} 的WebRTC Offer", deviceId);
+    }
+    
+    /**
+     * 发送WebRTC Answer（CODE 24），ssid 走默认
+     */
+    public void sendWebRtcAnswer(String deviceId, String sid, String sdp) throws Exception {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("code", 24);
+        msg.put("time", TimeValidator.getCurrentTimestamp());
+        msg.put("sid", sid);
+        msg.put("sdp", sdp);
+        
+        sendToDevice(deviceId, msg, null);
+        log.info("已发送WebRTC Answer到设备 {}", deviceId);
+    }
+    
+    /**
+     * 发送WebRTC Candidate（CODE 25），ssid 走默认
+     */
+    public void sendWebRtcCandidate(String deviceId, String sid, String candidate) throws Exception {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("code", 25);
+        msg.put("time", TimeValidator.getCurrentTimestamp());
+        msg.put("sid", sid);
+        msg.put("candidate", candidate);
+        
+        sendToDevice(deviceId, msg, null);
+        log.info("已发送WebRTC Candidate到设备 {}", deviceId);
+    }
+    
+    /**
+     * 获取最新的 WebRTC Offer（按 sid）
+     */
+    public WebRtcMessage getLatestOffer(String sid) {
+        return webrtcOfferCache.get(sid);
+    }
+    
+    /**
+     * 获取并清空指定 sid 下缓存的 WebRTC Candidates
+     */
+    public List<WebRtcMessage> drainCandidates(String sid) {
+        return webrtcCandidateCache.remove(sid);
+    }
+    
+    /**
+     * 从topic提取设备ID
+     */
+    private String extractDeviceIdFromTopic(String topic) {
+        // camera/pura365/{deviceId}/device
+        String[] parts = topic.split("/");
+        if (parts.length >= 3) {
+            return parts[2];
+        }
+        return null;
+    }
+    
+    /**
+     * 注册设备的SSID（用于加解密）
+     */
+    public void registerDeviceSsid(String deviceId, String ssid) {
+        deviceSsidService.saveSsid(deviceId, ssid);
+    }
+
+    // 把你日志里的那串16进制粘过来
+    private static final String HEX = "3479 7bc3 bd97 30f5 b9bb f6dc 74ba 6273 3a64 81c6 5703 4f31 64ce d7b4 909c b03a cae1 228a 79fc 6a36 bbe9 0db3 88ee 1cc0 84eb 128f 5f06 b438 ffa4 9609 d41b 240e 43ae e6b9 b3ac 63e7 db29 a83a f3f7 e421";
+
+    public static void main(String[] args) throws Exception {
+        byte[] payload = hexToBytes(HEX);
+
+        // 这里把可能的 SSID 都列出来，一个个试
+        String[] ssids = {
+                "SGHome",       // 你现在服务端写死的
+                "AOCCX",        // 之前示例里提到的
+                "YourRealWifi", // 把设备实际连的 WiFi SSID 写进来
+                "test",         // 你们固件那边如果有写死的测试值，就填上
+        };
+
+        MqttEncryptService enc = new MqttEncryptService();
+        for (String ssid : ssids) {
+            try {
+                String json = enc.decrypt(payload, ssid);
+                System.out.println("=== SSID = " + ssid + " ===");
+                System.out.println(json);
+            } catch (Exception e) {
+                System.out.println("=== SSID = " + ssid + " 解密失败: " + e.getMessage());
+            }
+        }
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        hex = hex.replace(" ", "").trim();
+        int len = hex.length();
+        byte[] out = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            out[i / 2] = (byte) Integer.parseInt(hex.substring(i, i + 2), 16);
+        }
+        return out;
+    }
+
+}

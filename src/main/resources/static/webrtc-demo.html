@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Camera WebRTC Demo</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 16px; }
+        label { display: block; margin-top: 8px; }
+        input { width: 320px; }
+        button { margin: 4px 4px 4px 0; }
+        #remoteVideo { width: 640px; height: 360px; background: #000; margin-top: 12px; }
+        #log { width: 640px; height: 200px; border: 1px solid #ccc; padding: 4px; overflow-y: auto; white-space: pre-wrap; margin-top: 12px; }
+    </style>
+</head>
+<body>
+<h1>Camera WebRTC Demo</h1>
+
+<div>
+    <label>
+        Device ID:
+        <input id="deviceId" value="A111-bbc1234" />
+    </label>
+    <label>
+        RTC Server (server,user,pass):
+        <input id="rtcServer" value="stun:stun.l.google.com:19302,," />
+    </label>
+    <button onclick="startWebRtc()">Start WebRTC</button>
+</div>
+
+<div style="margin-top:8px;">
+    <button onclick="sendPtz('left')">PTZ Left</button>
+    <button onclick="sendPtz('right')">PTZ Right</button>
+    <button onclick="sendPtz('up')">PTZ Up</button>
+    <button onclick="sendPtz('down')">PTZ Down</button>
+</div>
+
+<video id="remoteVideo" autoplay playsinline muted></video>
+
+<div id="log"></div>
+
+<script>
+    let pc = null;
+    let dataChannel = null;
+    let currentSid = null;
+    let currentDeviceId = null;
+    let offerPollTimer = null;
+    let candidatePollTimer = null;
+
+    function log(msg) {
+        const el = document.getElementById('log');
+        const time = new Date().toISOString().substr(11, 8);
+        el.textContent += `[${time}] ${msg}\n`;
+        el.scrollTop = el.scrollHeight;
+        console.log(msg);
+    }
+
+    function parseRtcServer(str) {
+        // 接口传给设备的 rtcServer 可以是："8.129.3.8:3478,test_rtc,test123456"
+        // 这里做浏览器自己的解析：
+        // 1. 仍然按 server,user,pass 三段解析
+        // 2. 如果 server 没有前缀（比如 8.129.3.8:3478），设备那边还是拿到原始串
+        // 3. 但浏览器这边默认按 TURN 来用，并带上 user/pass
+        if (!str) {
+            // 如果前端没填，给一个兜底的公共 STUN，避免完全没有 ICE 服务器
+            return { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        }
+        const parts = str.split(',');
+        const rawServer = (parts[0] || '').trim(); // 原始的，传给设备用
+        const user = (parts[1] || '').trim();
+        const pass = (parts[2] || '').trim();
+
+        let browserServer = rawServer;
+        const iceServers = [];
+        if (browserServer) {
+            // 浏览器侧处理：
+            // - 已经带前缀：stun: / turn:，就按前缀用
+            // - 没带前缀：默认当成 TURN 地址（因为设备端要求不能出现 turn: 前缀）
+            if (!browserServer.startsWith('stun:') && !browserServer.startsWith('turn:')) {
+                browserServer = 'turn:' + browserServer;
+            }
+
+            const conf = { urls: browserServer };
+            // 如果走 TURN，就带上用户名和密码
+            if (browserServer.startsWith('turn:')) {
+                if (!user || !pass) {
+                    console.warn('[webrtc-demo] TURN server configured without username/credential, browser may not get relay candidates:', browserServer);
+                }
+                if (user) conf.username = user;
+                if (pass) conf.credential = pass;
+            }
+            iceServers.push(conf);
+        }
+        // 再兜底一次：如果解析后还是没有任何 ICE server，就至少给一个公共 STUN
+        if (iceServers.length === 0) {
+            iceServers.push({ urls: 'stun:stun.l.google.com:19302' });
+        }
+        return { iceServers };
+    }
+
+    async function startWebRtc() {
+        currentDeviceId = document.getElementById('deviceId').value.trim();
+        const rtcServer = document.getElementById('rtcServer').value.trim();
+        if (!currentDeviceId) {
+            alert('请输入 Device ID');
+            return;
+        }
+        currentSid = Date.now().toString();
+        log(`Start WebRTC: deviceId=${currentDeviceId}, sid=${currentSid}`);
+
+        // 清理旧连接
+        if (pc) {
+            pc.close();
+            pc = null;
+        }
+        dataChannel = null;
+        if (offerPollTimer) clearInterval(offerPollTimer);
+        if (candidatePollTimer) clearInterval(candidatePollTimer);
+
+        // 1. 请求设备生成 Offer (后端会发 MQTT CODE 23)
+        //    路径调整为 /api/internal/mqtt/...
+        const offerUrl = `/api/internal/mqtt/device/${encodeURIComponent(currentDeviceId)}/webrtc/offer` +
+            `?sid=${encodeURIComponent(currentSid)}&rtcServer=${encodeURIComponent(rtcServer)}`;
+        await fetch(offerUrl, { method: 'POST' });
+        log('Offer request sent to device');
+
+        // 2. 轮询后端拿 Offer
+        const offer = await waitForOffer(currentSid);
+        log('Offer SDP received');
+
+        // 3. 创建 RTCPeerConnection
+        const config = parseRtcServer(rtcServer);
+
+        // 如果配置里包含 TURN，就强制只走 TURN 中继，避免浏览器优先选择 host/srflx 导致连不通
+        const pcConfig = { ...config };
+        if (config && Array.isArray(config.iceServers)) {
+            const hasTurn = config.iceServers.some(s => {
+                const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+                return urls.some(u => typeof u === 'string' && u.startsWith('turn:'));
+            });
+            if (hasTurn) {
+                pcConfig.iceTransportPolicy = 'relay';
+            }
+        }
+
+        pc = new RTCPeerConnection(pcConfig);
+        log('RTCPeerConnection created with config: ' + JSON.stringify(pcConfig));
+
+        pc.oniceconnectionstatechange = () => {
+            log('iceConnectionState = ' + pc.iceConnectionState);
+        };
+        pc.onconnectionstatechange = () => {
+            log('connectionState = ' + pc.connectionState);
+        };
+
+        pc.ontrack = (event) => {
+            log('ontrack fired');
+            const video = document.getElementById('remoteVideo');
+            if (event.streams && event.streams[0]) {
+                video.srcObject = event.streams[0];
+                video.muted = true; // 避免自动播放被浏览器拦截
+                video.play().catch(e => log('video.play error: ' + e));
+            }
+        };
+
+        pc.ondatachannel = (event) => {
+            dataChannel = event.channel;
+            log('DataChannel received: ' + dataChannel.label);
+            try {
+                dataChannel.binaryType = 'arraybuffer';
+            } catch (e) {
+                log('Set dataChannel.binaryType failed: ' + e);
+            }
+            dataChannel.onopen = () => log('DataChannel opened');
+            dataChannel.onmessage = (e) => handleDataChannelMessage(e.data);
+            dataChannel.onclose = () => log('DataChannel closed');
+        };
+
+        function handleDataChannelMessage(data) {
+            if (typeof data === 'string') {
+                log('DataChannel text: ' + data);
+                return;
+            }
+            if (data instanceof ArrayBuffer) {
+                parseFileIndexResponse(data);
+                return;
+            }
+            if (data instanceof Blob) {
+                data.arrayBuffer().then(parseFileIndexResponse).catch(err => {
+                    log('Failed to read Blob from DataChannel: ' + err);
+                });
+                return;
+            }
+            log('DataChannel unknown message type: ' + Object.prototype.toString.call(data));
+        }
+
+        function parseFileIndexResponse(buffer) {
+            const view = new DataView(buffer);
+            if (view.byteLength === 0) {
+                log('FileIndex response: empty');
+                return;
+            }
+            const header = view.getUint8(0);
+            if (header !== 0x66) { // 'f'
+                log('FileIndex response: unexpected header ' + String.fromCharCode(header));
+                return;
+            }
+            const recordSize = 18; // 文档里说每个文件18字节
+            const count = Math.floor((view.byteLength - 1) / recordSize);
+            const files = [];
+            let offset = 1;
+            const textDecoder = new TextDecoder('ascii');
+            for (let i = 0; i < count; i++) {
+                const base = offset + i * recordSize;
+                const nameBytes = [];
+                for (let j = 0; j < 12; j++) {
+                    const b = view.getUint8(base + j);
+                    if (b === 0) break;
+                    nameBytes.push(b);
+                }
+                const filename = textDecoder.decode(new Uint8Array(nameBytes));
+                const delFlag = view.getUint8(base + 12);
+                const duration = view.getUint16(base + 13, true); // 小端秒数
+                const reserved = view.getUint8(base + 15);
+                files.push({ filename, deleted: delFlag !== 0, duration, reserved });
+            }
+            log('FileIndex: ' + JSON.stringify(files));
+            console.log('FileIndex raw records:', files);
+        }
+
+        pc.onicecandidate = async (event) => {
+            if (event.candidate) {
+                log('Local ICE candidate: ' + event.candidate.candidate);
+                // 本地 ICE candidate 也改成 /api/internal/mqtt/...
+                const url = `/api/internal/mqtt/device/${encodeURIComponent(currentDeviceId)}/webrtc/candidate` +
+                    `?sid=${encodeURIComponent(currentSid)}&candidate=${encodeURIComponent(event.candidate.candidate)}`;
+                try {
+                    await fetch(url, { method: 'POST' });
+                } catch (e) {
+                    log('Send local candidate failed: ' + e);
+                }
+            } else {
+                log('Local ICE gathering complete');
+            }
+        };
+
+        // 4. 设置远端 Offer
+        await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+        log('Remote description (offer) set');
+
+        // 打印浏览器真正使用的 SDP，方便和后端返回值对比
+        if (pc.remoteDescription && pc.remoteDescription.sdp) {
+            console.log('Remote SDP from RTCPeerConnection:\n' + pc.remoteDescription.sdp);
+            const firstLines = pc.remoteDescription.sdp.split('\r\n').slice(0, 12).join('\n');
+            log('Remote SDP (first lines):\n' + firstLines);
+        }
+
+        // 5. 创建并发送 Answer
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        log('Local description (answer) created');
+
+        if (pc.localDescription && pc.localDescription.sdp) {
+            console.log('Local SDP (answer) from RTCPeerConnection:\n' + pc.localDescription.sdp);
+        }
+
+        // 5.1 通过 MQTT 通知设备设置浏览器 Answer，路径使用 /api/internal/mqtt/...
+        const answerUrl = `/api/internal/mqtt/device/${encodeURIComponent(currentDeviceId)}/webrtc/answer` +
+            `?sid=${encodeURIComponent(currentSid)}&sdp=${encodeURIComponent(answer.sdp)}`;
+        await fetch(answerUrl, { method: 'POST' });
+        log('Answer sent to device');
+
+        // 6. 开始轮询设备端上报的 ICE Candidate
+        candidatePollTimer = setInterval(pollRemoteCandidates, 1000);
+    }
+
+    async function waitForOffer(sid) {
+        return new Promise((resolve) => {
+            offerPollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/internal/webrtc/offer/${encodeURIComponent(sid)}`);
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    if (data.found) {
+                        clearInterval(offerPollTimer);
+                        offerPollTimer = null;
+                        resolve(data);
+                    }
+                } catch (e) {
+                    log('waitForOffer error: ' + e);
+                }
+            }, 1000);
+        });
+    }
+
+    async function pollRemoteCandidates() {
+        if (!currentSid) return;
+        try {
+            const res = await fetch(`/api/internal/webrtc/candidates/${encodeURIComponent(currentSid)}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            if (!data.found || !data.candidates) return;
+            for (const c of data.candidates) {
+                log('Remote ICE candidate: ' + c);
+                if (pc) {
+                    try {
+                        await pc.addIceCandidate(new RTCIceCandidate({ candidate: c }));
+                    } catch (e) {
+                        log('addIceCandidate error: ' + e);
+                    }
+                }
+            }
+        } catch (e) {
+            log('pollRemoteCandidates error: ' + e);
+        }
+    }
+
+    async function sendPtz(cmd) {
+        // 优先通过 WebRTC DataChannel 直连设备，符合协议文档
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+            log('DataChannel 未就绪，无法发送 PTZ 指令（' + cmd + '）');
+            return;
+        }
+        try {
+            dataChannel.send(cmd);
+            log('PTZ command sent via WebRTC DataChannel: ' + cmd);
+        } catch (e) {
+            log('PTZ command send failed: ' + e);
+        }
+    }
+</script>
+</body>
+</html>

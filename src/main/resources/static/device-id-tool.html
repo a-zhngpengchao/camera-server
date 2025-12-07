@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>IPC 机身号生成器</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    label { display: block; margin: 8px 0 4px; }
+    select { min-width: 260px; padding: 4px; }
+    button { margin-top: 12px; padding: 6px 14px; }
+    .result { margin-top: 16px; font-weight: bold; }
+  </style>
+</head>
+<body>
+<h1>IPC 机身号生成器</h1>
+
+<form id="deviceIdForm" onsubmit="return false;">
+  <!-- 第 1–2 位：组合配置 -->
+  <label for="firstTwo">第 1–2 位（网络+镜头）：</label>
+  <select id="firstTwo">
+    <option value="">请选择</option>
+    <option value="A1">A1 - 单频2.4G WiFi，单目</option>
+    <option value="A2">A2 - 单频2.4G WiFi，双目</option>
+    <option value="A3">A3 - 单频2.4G WiFi，三目</option>
+    <option value="B1">B1 - 双频2.4G+5G WiFi+BLE，单目</option>
+    <option value="B2">B2 - 双频2.4G+5G WiFi+BLE，双目</option>
+    <option value="B3">B3 - 双频2.4G+5G WiFi+BLE，三目</option>
+    <option value="C1">C1 - 4G CAT1，单目</option>
+    <option value="C2">C2 - 4G CAT1，双目</option>
+    <option value="R1">R1 - RJ45，有线，单目</option>
+  </select>
+
+  <!-- 第 3 位：设备形态 -->
+  <label for="third">第 3 位（设备形态）：</label>
+  <select id="third">
+    <option value="">请选择</option>
+    <option value="1">1 - 常电设备，卡片机</option>
+    <option value="2">2 - 常电设备，摇头机</option>
+    <option value="3">3 - PIR 低功耗电池机，卡片机</option>
+    <option value="4">4 - PIR 低功耗电池机，摇头机</option>
+    <option value="5">5 - AOV 电池机，卡片机</option>
+  </select>
+
+  <!-- 第 4 位：特殊要求标识 -->
+  <label for="fourth">第 4 位（特殊要求）：</label>
+  <select id="fourth">
+    <option value="">请选择</option>
+    <option value="0">0 - 无</option>
+    <option value="1">1 - 需要白光灯控制按键</option>
+    <option value="2">2 - 拐杖产品</option>
+    <option value="3">3 - 鸟笼产品</option>
+  </select>
+
+  <!-- 第 5 位：装机商识别号 -->
+  <label for="fifth">第 5 位（装机商）：</label>
+  <select id="fifth">
+    <option value="">请选择</option>
+    <option value="0">0 - 默认（组装厂 = 客户）</option>
+    <option value="A">A - 测试账号</option>
+  </select>
+
+  <!-- 第 6–7 位：销售商识别号 -->
+  <label for="sixthSeventh">第 6–7 位（销售商）：</label>
+  <select id="sixthSeventh">
+    <option value="">请选择</option>
+    <option value="00">00 - 默认</option>
+    <option value="01">01 - 销售商 01</option>
+    <option value="AA">AA - 测试账号</option>
+  </select>
+
+  <!-- 第 8 位：预留 -->
+  <label for="eighth">第 8 位（预留）：</label>
+  <select id="eighth">
+    <option value="0">0 - 预留（当前无意义）</option>
+  </select>
+
+  <!-- 第 9–16 位：唯一 ID -->
+  <label for="tail">第 9–16 位（机身唯一 ID，8 位）：</label>
+  <input id="tail" type="text" maxlength="8" placeholder="例如 00000001" style="min-width:260px; padding:4px;" />
+
+  <div>
+    <button type="button" onclick="buildLocal()">本地生成机身号</button>
+    <button type="button" onclick="sendToServer()">发送到后端</button>
+  </div>
+</form>
+
+<div class="result">
+  当前组合的机身号：<span id="deviceIdPreview"></span>
+</div>
+
+<pre id="serverResponse" style="margin-top:10px; background:#f5f5f5; padding:8px; white-space:pre-wrap;"></pre>
+
+<script>
+  function collectParts() {
+    return {
+      first_two: document.getElementById('firstTwo').value || '',
+      third: document.getElementById('third').value || '',
+      fourth: document.getElementById('fourth').value || '',
+      fifth: document.getElementById('fifth').value || '',
+      sixth_seventh: document.getElementById('sixthSeventh').value || '',
+      eighth: document.getElementById('eighth').value || '',
+      tail: document.getElementById('tail').value || ''
+    };
+  }
+
+  function buildDeviceId(parts) {
+    // 按位拼接，顺序：1-2 + 3 + 4 + 5 + 6-7 + 8 + 9-16
+    return (parts.first_two || '') +
+           (parts.third || '') +
+           (parts.fourth || '') +
+           (parts.fifth || '') +
+           (parts.sixth_seventh || '') +
+           (parts.eighth || '') +
+           (parts.tail || '');
+  }
+
+  function buildLocal() {
+    const parts = collectParts();
+    const id = buildDeviceId(parts);
+    document.getElementById('deviceIdPreview').textContent = id || '(未完整选择)';
+  }
+
+  async function sendToServer() {
+    const parts = collectParts();
+    const id = buildDeviceId(parts);
+    if (!parts.first_two) {
+      alert('至少要选择第 1–2 位');
+      return;
+    }
+
+    try {
+      const resp = await fetch('/api/device-id/build', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(parts)
+      });
+      const json = await resp.json();
+      document.getElementById('serverResponse').textContent =
+        JSON.stringify(json, null, 2);
+    } catch (e) {
+      document.getElementById('serverResponse').textContent =
+        '请求失败: ' + e;
+    }
+
+    document.getElementById('deviceIdPreview').textContent = id || '(未完整选择)';
+  }
+</script>
+</body>
+</html>

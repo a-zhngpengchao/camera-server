@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  camera-api:
+    build: .
+    container_name: camera-api
+    restart: always
+    ports:
+      - "80:80"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./logs:/app/logs
