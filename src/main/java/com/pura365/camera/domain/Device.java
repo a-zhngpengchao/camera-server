@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 @TableName("device")
 public class Device {
     
-    @TableId(value = "id", type = IdType.INPUT)
+    @TableId(value = "id ", type = IdType.INPUT)
     private String id; // 设备序列号
     
     @TableField("mac")
