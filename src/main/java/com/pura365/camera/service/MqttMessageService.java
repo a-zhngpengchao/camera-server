@@ -242,26 +242,29 @@ public class MqttMessageService {
     }
     
     /**
-     * 处理设备信息响应
+     * 处理设备信息响应(CODE 139)
+     * 更新设备的完整状态信息到数据库，同时作为心跳响应更新在线状态
      */
     private void handleDeviceInfo(MqttDeviceInfoMessage msg, String deviceId) {
-        log.info("收到设备信息 - WiFi: {}, RSSI: {}, 版本: {}", 
-                msg.getWifiname(), msg.getWifirssi(), msg.getVer());
+        log.info("收到设备信息 - 设备: {}, WiFi: {}, RSSI: {}, 版本: {}, TF卡: {}", 
+                deviceId, msg.getWifiname(), msg.getWifirssi(), msg.getVer(), 
+                msg.getSdstate() == 1 ? "有" : "无");
         
         // 更新设备信息到数据库
         try {
             Device device = deviceRepository.selectById(deviceId);
-            if (device == null) {
+            boolean isNewDevice = (device == null);
+            
+            if (isNewDevice) {
                 // 设备不存在，创建新记录
                 device = new Device();
                 device.setId(deviceId);
                 device.setMac("UNKNOWN");
-                device.setStatus(1);
                 device.setEnabled(1);
                 device.setCreatedAt(LocalDateTime.now());
             }
             
-            // 更新设备信息
+            // 更新基本信息
             if (msg.getWifiname() != null) {
                 device.setSsid(msg.getWifiname());
                 // 同步更新 SSID 到缓存，用于后续消息加解密
@@ -270,16 +273,63 @@ public class MqttMessageService {
             if (msg.getVer() != null) {
                 device.setFirmwareVersion(msg.getVer());
             }
-            device.setLastOnlineTime(LocalDateTime.now());
-            device.setUpdatedAt(LocalDateTime.now());
             
-            if (device.getCreatedAt() == null) {
+            // 更新WiFi信号强度
+            if (msg.getWifirssi() != null) {
+                device.setWifiRssi(msg.getWifirssi());
+            }
+            
+            // 更新TF卡信息
+            if (msg.getSdstate() != null) {
+                device.setSdState(msg.getSdstate());
+            }
+            if (msg.getSdcap() != null) {
+                device.setSdCapacity(msg.getSdcap());
+            }
+            if (msg.getSdblock() != null) {
+                device.setSdBlockSize(msg.getSdblock());
+            }
+            if (msg.getSdfree() != null) {
+                device.setSdFree(msg.getSdfree());
+            }
+            
+            // 更新摄像头设置状态
+            if (msg.getRotate() != null) {
+                device.setRotate(msg.getRotate());
+            }
+            if (msg.getLightled() != null) {
+                device.setLightLed(msg.getLightled());
+            }
+            if (msg.getWhiteled() != null) {
+                device.setWhiteLed(msg.getWhiteled());
+            }
+            
+            // 更新在线状态和心跳时间
+            device.setStatus(1); // 1-在线
+            LocalDateTime now = LocalDateTime.now();
+            device.setLastOnlineTime(now);
+            device.setLastHeartbeatTime(now); // 收到设备信息即为心跳响应
+            device.setUpdatedAt(now);
+            
+            if (isNewDevice) {
                 deviceRepository.insert(device);
                 log.info("已创建设备 {} 信息记录", deviceId);
             } else {
                 deviceRepository.updateById(device);
-                log.info("已更新设备 {} 信息: SSID={}, 版本={}", deviceId, msg.getWifiname(), msg.getVer());
+                log.info("已更新设备 {} 状态: SSID={}, RSSI={}, 版本={}, TF卡状态={}", 
+                        deviceId, msg.getWifiname(), msg.getWifirssi(), msg.getVer(), msg.getSdstate());
             }
+            
+            // 记录TF卡容量信息(用于调试)
+            if (msg.getSdstate() != null && msg.getSdstate() == 1) {
+                long totalBytes = (msg.getSdcap() != null && msg.getSdblock() != null) 
+                        ? msg.getSdcap() * msg.getSdblock() : 0;
+                long freeBytes = (msg.getSdfree() != null && msg.getSdblock() != null) 
+                        ? msg.getSdfree() * msg.getSdblock() : 0;
+                log.info("设备 {} TF卡容量: 总计 {} MB, 剩余 {} MB", 
+                        deviceId, totalBytes / 1024 / 1024, freeBytes / 1024 / 1024);
+            }
+            
         } catch (Exception e) {
             log.error("更新设备 {} 信息失败", deviceId, e);
         }
