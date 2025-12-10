@@ -130,6 +130,13 @@ public class DeviceDetailVO {
     @Schema(description = "最后心跳时间")
     private String lastHeartbeatAt;
 
+    /**
+     * 是否已领取7天免费云录像
+     */
+    @JsonProperty("free_cloud_claimed")
+    @Schema(description = "是否已领取7天免费云录像")
+    private Boolean freeCloudClaimed;
+
     // Getters and Setters
 
     public String getId() {
@@ -226,6 +233,14 @@ public class DeviceDetailVO {
 
     public void setLastHeartbeatAt(String lastHeartbeatAt) {
         this.lastHeartbeatAt = lastHeartbeatAt;
+    }
+
+    public Boolean getFreeCloudClaimed() {
+        return freeCloudClaimed;
+    }
+
+    public void setFreeCloudClaimed(Boolean freeCloudClaimed) {
+        this.freeCloudClaimed = freeCloudClaimed;
     }
 
     public SdCardInfoVO getSdCard() {

@@ -133,6 +133,10 @@ public class Device {
     @TableField("last_heartbeat_time")
     private LocalDateTime lastHeartbeatTime;
 
+    /** 是否已领取7天免费云录像: 0-未领取 1-已领取 */
+    @TableField("free_cloud_claimed")
+    private Integer freeCloudClaimed;
+
     /** 创建时间 */
     @TableField("created_at")
     private LocalDateTime createdAt;

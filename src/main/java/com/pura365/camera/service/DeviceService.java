@@ -383,6 +383,7 @@ public class DeviceService {
                 device.getLastOnlineTime().toString() : null);
         vo.setLastHeartbeatAt(device.getLastHeartbeatTime() != null ?
                 device.getLastHeartbeatTime().toString() : null);
+        vo.setFreeCloudClaimed(device.getFreeCloudClaimed() != null && device.getFreeCloudClaimed() == 1);
 
         return vo;
     }
