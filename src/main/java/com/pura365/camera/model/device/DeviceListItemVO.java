@@ -2,6 +2,7 @@ package com.pura365.camera.model.device;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Data;
 
 /**
  * 设备列表项响应
@@ -9,6 +10,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
  * @author camera-server
  */
 @Schema(description = "设备列表项")
+@Data
 public class DeviceListItemVO {
 
     /**
@@ -47,6 +49,13 @@ public class DeviceListItemVO {
     private Boolean hasCloudStorage;
 
     /**
+     * 是否开启AI功能
+     */
+    @JsonProperty("ai_enabled")
+    @Schema(description = "是否开启AI功能")
+    private Boolean aiEnabled;
+
+    /**
      * 云存储到期时间（ISO8601格式）
      */
     @JsonProperty("cloud_expire_at")
@@ -67,69 +76,18 @@ public class DeviceListItemVO {
     @Schema(description = "最后在线时间")
     private String lastOnlineAt;
 
-    // Getters and Setters
+    /**
+     * WiFi信号强度
+     */
+    @JsonProperty("wifi_rssi")
+    private Integer wifiRssi;
 
-    public String getId() {
-        return id;
-    }
+    /**
+     * 网络类型
+     */
+    @JsonProperty("network_type")
+    private String networkType;
 
-    public void setId(String id) {
-        this.id = id;
-    }
 
-    public String getName() {
-        return name;
-    }
 
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public String getModel() {
-        return model;
-    }
-
-    public void setModel(String model) {
-        this.model = model;
-    }
-
-    public String getStatus() {
-        return status;
-    }
-
-    public void setStatus(String status) {
-        this.status = status;
-    }
-
-    public Boolean getHasCloudStorage() {
-        return hasCloudStorage;
-    }
-
-    public void setHasCloudStorage(Boolean hasCloudStorage) {
-        this.hasCloudStorage = hasCloudStorage;
-    }
-
-    public String getCloudExpireAt() {
-        return cloudExpireAt;
-    }
-
-    public void setCloudExpireAt(String cloudExpireAt) {
-        this.cloudExpireAt = cloudExpireAt;
-    }
-
-    public String getThumbnailUrl() {
-        return thumbnailUrl;
-    }
-
-    public void setThumbnailUrl(String thumbnailUrl) {
-        this.thumbnailUrl = thumbnailUrl;
-    }
-
-    public String getLastOnlineAt() {
-        return lastOnlineAt;
-    }
-
-    public void setLastOnlineAt(String lastOnlineAt) {
-        this.lastOnlineAt = lastOnlineAt;
-    }
 }

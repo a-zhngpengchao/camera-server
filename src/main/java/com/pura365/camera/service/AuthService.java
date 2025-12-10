@@ -31,7 +31,7 @@ public class AuthService {
 
     // TODO: 如果你有正式配置，可以把 SECRET_KEY 放到配置文件
     private static final String SECRET_KEY = "app-user-jwt-secret-camera-server";
-    private static final long ACCESS_TOKEN_EXPIRE_SECONDS = 7200; // 2 小时
+    private static final long ACCESS_TOKEN_EXPIRE_SECONDS = 259200; // 72 小时
 
     private static final String AUTH_TYPE_WECHAT = "wechat";
     private static final String AUTH_TYPE_APPLE = "apple";

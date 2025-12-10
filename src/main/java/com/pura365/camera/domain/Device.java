@@ -97,6 +97,10 @@ public class Device {
 
     // ==================== 摄像头实时状态字段 ====================
 
+    /** 网络类型: 4G/wifi */
+    @TableField("network_type")
+    private String networkType;
+
     /** WiFi信号强度(RSSI) */
     @TableField("wifi_rssi")
     private Integer wifiRssi;

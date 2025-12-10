@@ -205,6 +205,11 @@ public class DeviceService {
             deviceRepository.updateById(device);
             log.info("更新设备 {} 名称为: {}", deviceId, request.getName());
         }
+        if (request.getAiEnabled() != null) {
+            device.setAiEnabled(request.getAiEnabled());
+            deviceRepository.updateById(device);
+            log.info("更新设备 {} 名称为: {}", deviceId, request.getName());
+        }
 
         return buildDeviceVO(device);
     }
@@ -330,15 +335,21 @@ public class DeviceService {
         vo.setName(device.getName());
         vo.setModel(null); // 暂无型号字段
         vo.setStatus(isOnline(device) ? "online" : "offline");
-
         // 云存储状态
-        CloudSubscription subscription = findActiveSubscription(userId, device.getId());
-        boolean hasCloud = subscription != null &&
-                (subscription.getExpireAt() == null || subscription.getExpireAt().after(new Date()));
-        vo.setHasCloudStorage(hasCloud);
-        vo.setCloudExpireAt(hasCloud && subscription.getExpireAt() != null ?
-                formatIsoTime(subscription.getExpireAt()) : null);
-
+//        CloudSubscription subscription = findActiveSubscription(userId, device.getId());
+//        boolean hasCloud = subscription != null &&
+//                (subscription.getExpireAt() == null || subscription.getExpireAt().after(new Date()));
+//        vo.setHasCloudStorage(hasCloud);
+//        vo.setCloudExpireAt(hasCloud && subscription.getExpireAt() != null ?
+//                formatIsoTime(subscription.getExpireAt()) : null);
+        // 云存储开关
+        vo.setHasCloudStorage(device.getCloudStorage() == 0); // 兼容旧数据
+        // AI功能开关
+        vo.setAiEnabled(device.getAiEnabled() != null && device.getAiEnabled() == 1);
+        // 信号强度
+        vo.setWifiRssi(device.getWifiRssi());
+        // 网络类型
+        vo.setNetworkType(device.getNetworkType());
         vo.setThumbnailUrl(null); // 暂无缩略图字段
         vo.setLastOnlineAt(device.getLastOnlineTime() != null ?
                 device.getLastOnlineTime().toString() : null);
@@ -448,6 +459,7 @@ public class DeviceService {
         device.setName(request.getName());
         device.setSsid(request.getWifiSsid());
         device.setMac(request.getMac());
+        device.setNetworkType("wifi");
         device.setStatus(DEVICE_STATUS_OFFLINE);
         device.setEnabled(DEVICE_ENABLED);
         return device;
