@@ -210,12 +210,15 @@ public class MqttMessageService {
     private void handleMqttConnected(MqttCode10Message msg, String deviceId) {
         log.info("设备 {} MQTT已连接 - Status: {}", deviceId, msg.getStatus());
         
-        // 更新设备在线状态到数据库
+        // 更新设备在线状态到数据库（同时视为一次心跳）
         try {
+            LocalDateTime now = LocalDateTime.now();
             Device device = deviceRepository.selectById(deviceId);
             if (device != null) {
                 device.setStatus(1); // 1-在线
-                device.setLastOnlineTime(LocalDateTime.now());
+                device.setLastOnlineTime(now);
+                device.setLastHeartbeatTime(now); // MQTT连接也视为心跳
+                device.setUpdatedAt(now);
                 deviceRepository.updateById(device);
                 log.info("已更新设备 {} 状态为在线", deviceId);
             } else {
@@ -225,8 +228,10 @@ public class MqttMessageService {
                 device.setMac("UNKNOWN"); // MAC地址后续通过设备信息更新
                 device.setStatus(1);
                 device.setEnabled(1);
-                device.setLastOnlineTime(LocalDateTime.now());
-                device.setCreatedAt(LocalDateTime.now());
+                device.setLastOnlineTime(now);
+                device.setLastHeartbeatTime(now);
+                device.setCreatedAt(now);
+                device.setUpdatedAt(now);
                 deviceRepository.insert(device);
                 log.info("已创建新设备记录 {}", deviceId);
             }
