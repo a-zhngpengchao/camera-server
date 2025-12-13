@@ -290,9 +290,36 @@ CREATE TABLE IF NOT EXISTS `cloud_plan` (
     `original_price` DECIMAL(10,2) COMMENT '原价',
     `period` VARCHAR(20) COMMENT '计费周期',
     `features` TEXT COMMENT '特性',
+    `type` VARCHAR(20) DEFAULT 'motion' COMMENT '套餐类型: motion-动态录像, fulltime-全天录像, traffic-4G流量',
+    `sort_order` INT DEFAULT 0 COMMENT '排序序号',
     
-    UNIQUE KEY `uk_cloud_plan_id` (`plan_id`)
+    UNIQUE KEY `uk_cloud_plan_id` (`plan_id`),
+    INDEX `idx_cloud_plan_type` (`type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='云存储套餐表';
+
+-- 动态录像套餐
+INSERT INTO `cloud_plan` (`plan_id`, `name`, `description`, `storage_days`, `price`, `original_price`, `period`, `features`, `type`, `sort_order`) VALUES
+('motion-year-7d', '年卡【7天循环】', '所有数据，循环存储7天', 7, 98.00, 198.00, 'year', '["动态录像", "7天循环存储", "年卡套餐"]', 'motion', 1),
+('motion-quarter-7d', '三个月【7天循环】', '所有数据，循环存储7天', 7, 98.00, 198.00, 'quarter', '["动态录像", "7天循环存储", "季度套餐"]', 'motion', 2),
+('motion-month-7d', '一个月【7天循环】', '所有数据，循环存储7天', 7, 98.00, 198.00, 'month', '["动态录像", "7天循环存储", "月卡套餐"]', 'motion', 3),
+('motion-year-30d', '年卡【30天循环】', '所有数据，循环存储7天', 30, 98.00, 198.00, 'year', '["动态录像", "30天循环存储", "年卡套餐"]', 'motion', 4),
+('motion-quarter-30d', '三个月【30天循环】', '所有数据，循环存储7天', 30, 98.00, 198.00, 'quarter', '["动态录像", "30天循环存储", "季度套餐"]', 'motion', 5),
+('motion-month-30d', '一个月【30天循环】', '所有数据，循环存储7天', 30, 98.00, 198.00, 'month', '["动态录像", "30天循环存储", "月卡套餐"]', 'motion', 6);
+
+-- 全天录像套餐
+INSERT INTO `cloud_plan` (`plan_id`, `name`, `description`, `storage_days`, `price`, `original_price`, `period`, `features`, `type`, `sort_order`) VALUES
+('fulltime-year-7d', '年卡【7天循环】', '所有数据，循环存储7天', 7, 98.00, 198.00, 'year', '["全天录像", "7天循环存储", "年卡套餐"]', 'fulltime', 1),
+('fulltime-quarter-7d', '三个月【7天循环】', '所有数据，循环存储7天', 7, 98.00, 198.00, 'quarter', '["全天录像", "7天循环存储", "季度套餐"]', 'fulltime', 2),
+('fulltime-month-7d', '一个月【7天循环】', '所有数据，循环存储7天', 7, 98.00, 198.00, 'month', '["全天录像", "7天循环存储", "月卡套餐"]', 'fulltime', 3),
+('fulltime-year-30d', '年卡【30天循环】', '所有数据，循环存储7天', 30, 98.00, 198.00, 'year', '["全天录像", "30天循环存储", "年卡套餐"]', 'fulltime', 4),
+('fulltime-quarter-30d', '三个月【30天循环】', '所有数据，循环存储7天', 30, 98.00, 198.00, 'quarter', '["全天录像", "30天循环存储", "季度套餐"]', 'fulltime', 5),
+('fulltime-month-30d', '一个月【30天循环】', '所有数据，循环存储7天', 30, 98.00, 198.00, 'month', '["全天录像", "30天循环存储", "月卡套餐"]', 'fulltime', 6);
+
+-- 4G流量套餐
+INSERT INTO `cloud_plan` (`plan_id`, `name`, `description`, `storage_days`, `price`, `original_price`, `period`, `features`, `type`, `sort_order`) VALUES
+('traffic-70g', '70G流量 包月', '所有数据，循环存储7天', NULL, 39.00, 198.00, 'month', '["70G流量", "包月套餐"]', 'traffic', 1),
+('traffic-120g', '120G流量 包月', '所有数据，循环存储7天', NULL, 98.00, 198.00, 'month', '["120G流量", "包月套餐"]', 'traffic', 2),
+('traffic-200g', '200G流量 包月', '所有数据，循环存储7天', NULL, 198.00, 198.00, 'month', '["200G流量", "包月套餐"]', 'traffic', 3);
 
 CREATE TABLE IF NOT EXISTS `cloud_subscription` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键',

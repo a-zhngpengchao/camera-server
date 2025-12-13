@@ -1,19 +1,17 @@
 package com.pura365.camera.controller.internal;
 
 import com.pura365.camera.model.ApiResponse;
-import com.pura365.camera.model.share.ShareBindRequest;
-import com.pura365.camera.model.share.ShareGenerateRequest;
-import com.pura365.camera.model.share.SharePermissionUpdateRequest;
-import com.pura365.camera.model.share.ShareRevokeRequest;
+import com.pura365.camera.model.share.*;
 import com.pura365.camera.service.DeviceShareService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -40,9 +38,9 @@ public class DeviceShareController {
      * 生成分享码
      * POST /share/generate
      */
-    @Operation(summary = "生成分享码", description = "生成设备分享码，用于生成二维码")
+    @Operation(summary = "生成分享码", description = "生成设备分享码，用于生成二维码供他人扫码绑定")
     @PostMapping("/generate")
-    public ApiResponse<Map<String, Object>> generateShareCode(
+    public ApiResponse<ShareGenerateResponse> generateShareCode(
             @RequestAttribute("currentUserId") Long currentUserId,
             @RequestBody ShareGenerateRequest request) {
 
@@ -61,7 +59,13 @@ public class DeviceShareController {
 
         try {
             Map<String, Object> result = deviceShareService.generateShareCode(currentUserId, deviceId, permission, targetAccount);
-            return ApiResponse.success(result);
+            ShareGenerateResponse response = new ShareGenerateResponse();
+            response.setShareCode((String) result.get("share_code"));
+            response.setQrContent((String) result.get("qr_content"));
+            response.setExpireAt((String) result.get("expire_at"));
+            response.setDeviceId((String) result.get("device_id"));
+            response.setPermission((String) result.get("permission"));
+            return ApiResponse.success(response);
         } catch (Exception e) {
             log.error("生成分享码失败", e);
             return ApiResponse.error(500, e.getMessage());
@@ -72,9 +76,9 @@ public class DeviceShareController {
      * 通过分享码绑定设备（扫码后调用）
      * POST /share/bind
      */
-    @Operation(summary = "扫码绑定设备", description = "通过分享码绑定设备")
+    @Operation(summary = "扫码绑定设备", description = "通过分享码绑定设备，获得设备访问权限")
     @PostMapping("/bind")
-    public ApiResponse<Map<String, Object>> bindByShareCode(
+    public ApiResponse<ShareBindResponse> bindByShareCode(
             @RequestAttribute("currentUserId") Long currentUserId,
             @RequestBody ShareBindRequest request) {
 
@@ -91,7 +95,13 @@ public class DeviceShareController {
 
         try {
             Map<String, Object> result = deviceShareService.bindByShareCode(currentUserId, shareCode);
-            return ApiResponse.success(result);
+            ShareBindResponse response = new ShareBindResponse();
+            response.setSuccess((Boolean) result.get("success"));
+            response.setDeviceId((String) result.get("device_id"));
+            response.setDeviceName((String) result.get("device_name"));
+            response.setPermission((String) result.get("permission"));
+            response.setOwnerId((Long) result.get("owner_id"));
+            return ApiResponse.success(response);
         } catch (RuntimeException e) {
             return ApiResponse.error(400, e.getMessage());
         } catch (Exception e) {
@@ -104,10 +114,11 @@ public class DeviceShareController {
      * 获取设备的分享列表
      * GET /share/list?device_id=xxx
      */
-    @Operation(summary = "获取分享列表", description = "获取设备的分享用户列表")
+    @Operation(summary = "获取分享列表", description = "获取设备的分享用户列表，查看哪些用户有访问权限")
     @GetMapping("/list")
-    public ApiResponse<List<Map<String, Object>>> getShareList(
+    public ApiResponse<List<ShareUserVO>> getShareList(
             @RequestAttribute("currentUserId") Long currentUserId,
+            @Parameter(description = "设备ID", required = true, example = "DEVICE123456")
             @RequestParam("device_id") String deviceId) {
 
         if (deviceId == null || deviceId.isEmpty()) {
@@ -121,7 +132,18 @@ public class DeviceShareController {
 
         try {
             List<Map<String, Object>> list = deviceShareService.getShareList(currentUserId, deviceId);
-            return ApiResponse.success(list);
+            List<ShareUserVO> result = new ArrayList<>();
+            for (Map<String, Object> item : list) {
+                ShareUserVO vo = new ShareUserVO();
+                vo.setUserId((Long) item.get("user_id"));
+                vo.setUsername((String) item.get("username"));
+                vo.setNickname((String) item.get("nickname"));
+                vo.setAvatar((String) item.get("avatar"));
+                vo.setPermission((String) item.get("permission"));
+                vo.setSharedAt((String) item.get("shared_at"));
+                result.add(vo);
+            }
+            return ApiResponse.success(result);
         } catch (Exception e) {
             log.error("获取分享列表失败", e);
             return ApiResponse.error(500, "获取失败");
@@ -132,9 +154,9 @@ public class DeviceShareController {
      * 取消分享（移除某用户的访问权限）
      * POST /share/revoke
      */
-    @Operation(summary = "取消分享", description = "移除某用户对设备的访问权限")
+    @Operation(summary = "取消分享", description = "移除某用户对设备的访问权限，只有设备拥有者可操作")
     @PostMapping("/revoke")
-    public ApiResponse<Map<String, Object>> revokeShare(
+    public ApiResponse<Void> revokeShare(
             @RequestAttribute("currentUserId") Long currentUserId,
             @RequestBody ShareRevokeRequest request) {
 
@@ -167,9 +189,9 @@ public class DeviceShareController {
      * 更新分享权限
      * POST /share/permission
      */
-    @Operation(summary = "更新分享权限", description = "修改某用户对设备的权限")
+    @Operation(summary = "更新分享权限", description = "修改某用户对设备的权限，只有设备拥有者可操作")
     @PostMapping("/permission")
-    public ApiResponse<Map<String, Object>> updatePermission(
+    public ApiResponse<Void> updatePermission(
             @RequestAttribute("currentUserId") Long currentUserId,
             @RequestBody SharePermissionUpdateRequest request) {
 
@@ -206,10 +228,11 @@ public class DeviceShareController {
      * 检查当前用户对设备的权限
      * GET /share/check-permission?device_id=xxx
      */
-    @Operation(summary = "检查设备权限", description = "检查当前用户对设备的权限")
+    @Operation(summary = "检查设备权限", description = "检查当前用户对设备的权限，包括查看、控制等权限")
     @GetMapping("/check-permission")
-    public ApiResponse<Map<String, Object>> checkPermission(
+    public ApiResponse<SharePermissionVO> checkPermission(
             @RequestAttribute("currentUserId") Long currentUserId,
+            @Parameter(description = "设备ID", required = true, example = "DEVICE123456")
             @RequestParam("device_id") String deviceId) {
 
         if (deviceId == null || deviceId.isEmpty()) {
@@ -218,13 +241,13 @@ public class DeviceShareController {
 
         String permission = deviceShareService.checkPermission(currentUserId, deviceId);
 
-        java.util.Map<String, Object> result = new java.util.HashMap<>();
-        result.put("device_id", deviceId);
-        result.put("permission", permission);
-        result.put("can_view", permission != null);
-        result.put("can_control", "owner".equals(permission) || "full_control".equals(permission));
-        result.put("is_owner", "owner".equals(permission));
+        SharePermissionVO response = new SharePermissionVO();
+        response.setDeviceId(deviceId);
+        response.setPermission(permission);
+        response.setCanView(permission != null);
+        response.setCanControl("owner".equals(permission) || "full_control".equals(permission));
+        response.setIsOwner("owner".equals(permission));
 
-        return ApiResponse.success(result);
+        return ApiResponse.success(response);
     }
 }

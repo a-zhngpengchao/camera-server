@@ -50,4 +50,12 @@ public class CloudPlan {
     /** 套餐特性(JSON) */
     @TableField("features")
     private String features;
+
+    /** 套餐类型: motion-动态录像, fulltime-全天录像, traffic-4G流量 */
+    @TableField("type")
+    private String type;
+
+    /** 排序序号 */
+    @TableField("sort_order")
+    private Integer sortOrder;
 }
