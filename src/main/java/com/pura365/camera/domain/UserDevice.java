@@ -31,6 +31,10 @@ public class UserDevice {
     @TableField("role")
     private String role;
 
+    /** 权限: view_only-仅查看, full_control-完全控制 */
+    @TableField("permission")
+    private String permission;
+
     /** 创建时间 */
     @TableField("created_at")
     private Date createdAt;

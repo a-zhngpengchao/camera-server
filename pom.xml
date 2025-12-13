@@ -115,6 +115,20 @@
             <version>5.2.5</version>
         </dependency>
 
+        <!-- 七牛云 SDK for cloud storage -->
+        <dependency>
+            <groupId>com.qiniu</groupId>
+            <artifactId>qiniu-java-sdk</artifactId>
+            <version>7.13.1</version>
+        </dependency>
+
+        <!-- AWS SDK v2 for Vultr S3 compatible storage -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>2.20.26</version>
+        </dependency>
+
         <!-- Swagger/OpenAPI for Apifox (Spring Boot 2.x 使用 1.x 版本) -->
         <dependency>
             <groupId>org.springdoc</groupId>

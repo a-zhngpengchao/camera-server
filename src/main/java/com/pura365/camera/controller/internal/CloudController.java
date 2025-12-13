@@ -11,10 +11,13 @@ import com.pura365.camera.domain.CloudSubscription;
 import com.pura365.camera.domain.CloudVideo;
 import com.pura365.camera.domain.UserDevice;
 import com.pura365.camera.model.ApiResponse;
+import com.pura365.camera.model.cloud.ClaimFreeCloudRequest;
+import com.pura365.camera.model.cloud.CloudSubscribeRequest;
 import com.pura365.camera.repository.CloudPlanRepository;
 import com.pura365.camera.repository.CloudSubscriptionRepository;
 import com.pura365.camera.repository.CloudVideoRepository;
 import com.pura365.camera.repository.UserDeviceRepository;
+import com.pura365.camera.service.CloudStorageService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
@@ -46,6 +49,12 @@ public class CloudController {
 
     @Autowired
     private UserDeviceRepository userDeviceRepository;
+    
+    @Autowired
+    private com.pura365.camera.repository.DeviceRepository deviceRepository;
+    
+    @Autowired
+    private CloudStorageService cloudStorageService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -82,10 +91,10 @@ public class CloudController {
     @Operation(summary = "订阅云存储", description = "创建云存储套餐的支付订单")
     @PostMapping("/subscribe")
     public ApiResponse<Map<String, Object>> subscribe(@RequestAttribute("currentUserId") Long currentUserId,
-                                                      @RequestBody Map<String, String> body) {
-        String deviceId = body.get("device_id");
-        String planId = body.get("plan_id");
-        String paymentMethod = body.get("payment_method");
+                                                      @RequestBody CloudSubscribeRequest request) {
+        String deviceId = request.getDeviceId();
+        String planId = request.getPlanId();
+        String paymentMethod = request.getPaymentMethod();
         if (deviceId == null || deviceId.isEmpty() || planId == null || planId.isEmpty()) {
             return ApiResponse.error(400, "device_id 和 plan_id 不能为空");
         }
@@ -125,6 +134,7 @@ public class CloudController {
 
     /**
      * 云存储视频列表 - GET /cloud/videos
+     * 直接从S3云存储查询视频文件列表
      */
     @Operation(summary = "云存储视频列表", description = "分页查询某设备的云存储视频")
     @GetMapping("/videos")
@@ -141,34 +151,25 @@ public class CloudController {
         }
         if (page < 1) page = 1;
         if (pageSize <= 0) pageSize = 20;
-        int offset = (page - 1) * pageSize;
 
-        QueryWrapper<CloudVideo> qw = new QueryWrapper<>();
-        qw.lambda().eq(CloudVideo::getDeviceId, deviceId);
-        if (date != null && !date.isEmpty()) {
-            qw.apply("DATE(created_at) = {0}", date);
+        // 直接从云存储查询视频列表
+        List<Map<String, Object>> allVideos = cloudStorageService.listVideosFromCloud(deviceId, date);
+        
+        // 手动分页
+        int total = allVideos.size();
+        int fromIndex = (page - 1) * pageSize;
+        int toIndex = Math.min(fromIndex + pageSize, total);
+        
+        List<Map<String, Object>> list;
+        if (fromIndex >= total) {
+            list = new ArrayList<>();
+        } else {
+            list = allVideos.subList(fromIndex, toIndex);
         }
-        qw.orderByDesc("created_at");
-
-        int total = cloudVideoRepository.selectCount(qw).intValue();
-        List<CloudVideo> rows = cloudVideoRepository.selectList(qw.last("limit " + offset + "," + pageSize));
-
-        List<Map<String, Object>> list = new ArrayList<>();
-        if (rows != null) {
-            for (CloudVideo v : rows) {
-                Map<String, Object> item = new HashMap<>();
-                item.put("id", v.getVideoId());
-                item.put("device_id", v.getDeviceId());
-                item.put("type", v.getType());
-                item.put("title", v.getTitle());
-                item.put("thumbnail_url", v.getThumbnail());
-                item.put("video_url", v.getVideoUrl());
-                item.put("duration", v.getDuration());
-                if (v.getCreatedAt() != null) {
-                    item.put("created_at", formatIsoTime(v.getCreatedAt()));
-                }
-                list.add(item);
-            }
+        
+        // 移除内部使用的排序字段
+        for (Map<String, Object> video : list) {
+            video.remove("created_at_date");
         }
 
         Map<String, Object> data = new HashMap<>();
@@ -211,6 +212,62 @@ public class CloudController {
             data.put("auto_renew", false);
         }
         return ApiResponse.success(data);
+    }
+    
+    /**
+     * 领取免费7天云存储 - POST /cloud/claim-free
+     */
+    @Operation(summary = "领取免费7天云存储", description = "用户首次领取7天免费云存储")
+    @PostMapping("/claim-free")
+    public ApiResponse<Map<String, Object>> claimFreeTrial(@RequestAttribute("currentUserId") Long currentUserId,
+                                                           @RequestBody ClaimFreeCloudRequest request) {
+        String deviceId = request.getDeviceId();
+        
+        if (deviceId == null || deviceId.isEmpty()) {
+            return ApiResponse.error(400, "device_id不能为空");
+        }
+        
+        // 验证设备归属
+        if (!hasUserDevice(currentUserId, deviceId)) {
+            return ApiResponse.error(403, "无权操作该设备");
+        }
+        
+        // 检查设备是否已领取
+        com.pura365.camera.domain.Device device = deviceRepository.selectById(deviceId);
+        if (device == null) {
+            return ApiResponse.error(404, "设备不存在");
+        }
+        
+        if (device.getFreeCloudClaimed() != null && device.getFreeCloudClaimed() == 1) {
+            return ApiResponse.error(400, "该设备已领取过免费云存储");
+        }
+        
+        // 创建7天免费订阅
+        CloudSubscription subscription = new CloudSubscription();
+        subscription.setUserId(currentUserId);
+        subscription.setDeviceId(deviceId);
+        subscription.setPlanId("free-trial-7d");
+        subscription.setPlanName("7天免费试用");
+        
+        // 设置7天后过期
+        Calendar calendar = Calendar.getInstance();
+        calendar.add(Calendar.DAY_OF_MONTH, 7);
+        subscription.setExpireAt(calendar.getTime());
+        subscription.setAutoRenew(0);
+        subscription.setCreatedAt(new Date());
+        subscription.setUpdatedAt(new Date());
+        
+        cloudSubscriptionRepository.insert(subscription);
+        
+        // 标记设备已领取
+        device.setFreeCloudClaimed(1);
+        deviceRepository.updateById(device);
+        
+        Map<String, Object> result = new HashMap<>();
+        result.put("claimed", true);
+        result.put("expire_at", formatIsoTime(subscription.getExpireAt()));
+        
+        return ApiResponse.success(result);
     }
 
     // ===== 私有辅助方法 =====
